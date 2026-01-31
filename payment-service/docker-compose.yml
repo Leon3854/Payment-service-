@@ -1,0 +1,61 @@
+services:
+  payment-service:
+    build: .
+    env_file: .env
+    environment:
+      - DATABASE_URL=postgresql://postgres:123456@payment-db:5432/payment_db
+      - PORT=3000
+      # - REDIS_URL=redis://redis:6379
+      # - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672
+      - STRIPE_SECRET_KEY=sk_test_fake
+    ports:
+      - '3002:3000'
+    volumes:
+      - ./prisma/migrations:/app/prisma/migrations
+    depends_on:
+      - payment-db
+      # - rabbitmq
+      # - redis
+    restart: unless-stopped
+
+  payment-db:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: payment_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: 123456
+    ports:
+      - '5435:5432'
+    volumes:
+      - payment-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # RabbitMQ(arm64 compatible)
+  # rabbitmq:
+  #   image: rabbitmq:3.12-management
+  #   ports:
+  #     - '5672:5672'
+  #     - '15672:15672'
+  #   environment:
+  #     - RABBITMQ_DEFAULT_USER=guest
+  #     - RABBITMQ_DEFAULT_PASS=guest
+  #   restart: unless-stopped
+
+  #Redis
+  # redis:
+  #   image: redis:7-alpine
+  #   ports:
+  #     - '6379:6379'
+  #   command: redis-server --save 60 1 --loglevel warning
+  #   volumes:
+  #     - redis_data:/data
+  #   restart: unless-stopped
+
+volumes:
+  payment-db-data:
+  # redis_data:

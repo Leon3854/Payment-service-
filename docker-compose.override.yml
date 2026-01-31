@@ -1,0 +1,35 @@
+# docker-compose.override.yml
+# для локальной разработки
+
+services:
+  postgres:
+    volumes:
+      - ./postgres-data:/var/lib/postgresql/data
+      - ./init-db.sh:/docker-entrypoint-initdb.d/init-db.sh
+
+  auth-service:
+    environment:
+      - NODE_ENV=development
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/auth_db
+    volumes:
+      - ./auth-service:/usr/src/app
+      - /usr/src/app/node_modules
+    command: npm run start:dev
+
+  product-service:
+    environment:
+      - NODE_ENV=development
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/product_db
+    volumes:
+      - ./product-service:/usr/src/app
+      - /usr/src/app/node_modules
+    command: npm run start:dev
+
+  payment-service:
+    environment:
+      - NODE_ENV=development
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/payment_db
+    volumes:
+      - ./payment-service:/usr/src/app
+      - /usr/src/app/node_modules
+    command: npm run start:dev

@@ -1,0 +1,57 @@
+# docker-compose.test.yml
+
+services:
+  postgres-test:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_MULTIPLE_DATABASES: auth_db,product_db,payment_db
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    ports:
+      - "5433:5432"
+
+  auth-service-test:
+    build:
+      context: ./auth-service
+      dockerfile: Dockerfile
+      # target: development
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres-test:5432/auth_db
+      PORT: 3001
+      NODE_ENV: test
+    depends_on:
+      postgres-test:
+        condition: service_healthy
+    command: sh -c "npx prisma migrate deploy && npm run test:e2e"
+
+  product-service-test:
+    build:
+      context: ./product-service
+      dockerfile: Dockerfile
+      # target: development
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres-test:5432/product_db
+      PORT: 3000
+      NODE_ENV: test
+    depends_on:
+      postgres-test:
+        condition: service_healthy
+    command: sh -c "npx prisma migrate deploy && npm run test:e2e"
+
+  payment-service-test:
+    build:
+      context: ./payment-service
+      dockerfile: Dockerfile
+      # target: development
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres-test:5432/payment_db
+      PORT: 3002
+      NODE_ENV: test
+    depends_on:
+      postgres-test:
+        condition: service_healthy
+    command: sh -c "npx prisma migrate deploy && npm run test:e2e"

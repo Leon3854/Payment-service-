@@ -1,0 +1,358 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "nativeEnums", "linux-musl-arm64-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("PAYMENT_DATABASE_URL")
+}
+
+// ========== ОСНОВНЫЕ МОДЕЛИ ==========
+
+model Payment {
+  id         String          @id @default(cuid())
+  externalId String?         @unique // ID в платежной системе
+  provider   PaymentProvider
+
+  // Связи
+  userId  String
+  orderId String?
+
+  subscriptionId String?
+  subscription   Subscription? @relation(fields: [subscriptionId], references: [id])
+
+  invoiceId String?
+  invoice   Invoice? @relation(fields: [invoiceId], references: [id])
+
+  paymentMethodId String?
+  paymentMethod   PaymentMethod? @relation(fields: [paymentMethodId], references: [id])
+
+  // Платежная информация
+  amount        Decimal       @db.Decimal(10, 2)
+  currency      String        @default("RUB")
+  status        PaymentStatus
+  paymentMethod String? // Сохраненное название метода (для истории)
+
+  // Для рекуррентных платежей
+  isRecurring    Boolean @default(false)
+  isFirstPayment Boolean @default(false)
+  attemptCount   Int     @default(1)
+
+  // Даннинг
+  dunningStage Int       @default(0)
+  nextRetryAt  DateTime?
+
+  // Метаданные
+  description  String?
+  metadata     Json?
+  providerData Json?
+
+  // Даты
+  capturedAt DateTime?
+  refundedAt DateTime?
+  expiresAt  DateTime? // Для платежей с ограниченным сроком
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  refunds Refund[]
+
+  @@index([userId])
+  @@index([orderId])
+  @@index([status])
+  @@index([createdAt])
+  @@index([subscriptionId])
+  @@index([externalId])
+  @@index([userId, status], name: "user_payments_status_idx")
+  @@index([status, nextRetryAt], name: "pending_retry_idx")
+}
+
+// Подписка для рекуррентных платежей
+model Subscription {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Связи
+  userId         String
+  userCustomerId String? // ID клиента в платежной системе
+
+  // План подписки
+  planId   String
+  planName String
+  price    Decimal @db.Decimal(10, 2)
+  currency String  @default("RUB")
+
+  // Статус
+  status            SubscriptionStatus @default(PENDING)
+  cancelAtPeriodEnd Boolean            @default(false)
+  canceledAt        DateTime?
+
+  // Периоды
+  currentPeriodStart DateTime?
+  currentPeriodEnd   DateTime?
+  trialStart         DateTime?
+  trialEnd           DateTime?
+
+  // Настройки
+  billingCycle BillingCycle @default(MONTHLY)
+  autoRenew    Boolean      @default(true)
+  quantity     Int          @default(1)
+
+  // Внешние системы
+  externalId         String? // ID подписки в платежной системе
+  externalCustomerId String? // ID клиента в платежной системе
+
+  // Связанные сущности
+  payments Payment[]
+  invoices Invoice[]
+
+  // Метод оплаты по умолчанию
+  defaultPaymentMethodId String?
+  defaultPaymentMethod   PaymentMethod? @relation(fields: [defaultPaymentMethodId], references: [id])
+
+  // Метаданные
+  metadata Json?
+  notes    String?
+
+  @@index([userId])
+  @@index([status])
+  @@index([currentPeriodEnd])
+  @@index([createdAt])
+}
+
+// Счет (инвойс)
+model Invoice {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Связи
+  subscriptionId String?
+  subscription   Subscription? @relation(fields: [subscriptionId], references: [id])
+
+  userId String
+
+  // Суммы
+  amountDue  Decimal @db.Decimal(10, 2)
+  amountPaid Decimal @default(0) @db.Decimal(10, 2)
+  tax        Decimal @default(0) @db.Decimal(10, 2)
+  discount   Decimal @default(0) @db.Decimal(10, 2)
+
+  // Статус
+  status InvoiceStatus @default(DRAFT)
+  paidAt DateTime?
+
+  // Даты
+  dueDate     DateTime // Дата оплаты
+  periodStart DateTime? // Для подписок
+  periodEnd   DateTime? // Для подписок
+
+  // Автоматические списания
+  attemptCount  Int       @default(0)
+  nextAttemptAt DateTime?
+  maxAttempts   Int       @default(3)
+
+  // Детализация
+  items       Json? // Массив товаров/услуг
+  description String?
+
+  // Внешние системы
+  externalId String? // ID во внешней системе
+  invoiceUrl String? // Ссылка на PDF/страницу
+
+  // Метаданные
+  metadata Json?
+
+  // Связанные платежи
+  payments Payment[]
+
+  @@index([subscriptionId])
+  @@index([userId])
+  @@index([status])
+  @@index([dueDate])
+  @@index([createdAt])
+}
+
+// Сохраненные методы оплаты
+model PaymentMethod {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  userId   String
+  provider PaymentProvider
+
+  // Тип и данные
+  type       PaymentMethodType
+  externalId String? // ID во внешней системе
+
+  // Для карт
+  last4          String?
+  brand          String? // visa, mastercard
+  expiryMonth    Int?
+  expiryYear     Int?
+  cardholderName String?
+
+  // Для других методов
+  walletType    String? // apple_pay, google_pay
+  phone         String? // Для мобильных платежей
+  accountNumber String? // Для банковских переводов
+
+  // Статус
+  isDefault        Boolean   @default(false)
+  isValid          Boolean   @default(true)
+  verificationDate DateTime?
+
+  // Метаданные
+  metadata     Json?
+  providerData Json?
+
+  // Связи
+  payments      Payment[]
+  subscriptions Subscription[] // Подписки, использующие этот метод
+
+  @@index([userId])
+  @@index([externalId])
+  @@index([type, provider])
+  @@index([userId, isDefault], name: "user_default_payment_method_idx")
+}
+
+// Возвраты
+model Refund {
+  id         String  @id @default(cuid())
+  externalId String? @unique // ID в платежной системе
+  paymentId  String
+  payment    Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  amount   Decimal      @db.Decimal(10, 2)
+  currency String       @default("RUB")
+  status   RefundStatus
+  reason   String?
+
+  providerData Json? // Данные от платежного провайдера
+  metadata     Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([paymentId])
+  @@index([externalId])
+  @@index([status])
+}
+
+// Логирование вебхуков
+model WebhookEvent {
+  id          String          @id @default(cuid())
+  provider    PaymentProvider
+  eventType   String
+  data        Json
+  processed   Boolean         @default(false)
+  processedAt DateTime?
+  error       String?
+  createdAt   DateTime        @default(now())
+
+  @@index([provider, eventType])
+  @@index([createdAt])
+  @@index([processed])
+}
+
+// Даннинг процесс (взыскание долгов)
+model DunningProcess {
+  id        String  @id @default(cuid())
+  invoiceId String
+  invoice   Invoice @relation(fields: [invoiceId], references: [id])
+
+  userId         String
+  subscriptionId String?
+  subscription   Subscription? @relation(fields: [subscriptionId], references: [id])
+
+  currentStage Int           @default(1)
+  maxStages    Int           @default(6)
+  nextActionAt DateTime
+  lastActionAt DateTime?
+  actionsTaken Json? // Массив выполненных действий
+  status       DunningStatus @default(ACTIVE)
+
+  metadata  Json?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([invoiceId])
+  @@index([userId])
+  @@index([status, nextActionAt])
+}
+
+// ========== ENUMS ==========
+
+enum PaymentProvider {
+  YOOKASS
+  STRIPE
+  PAYPAL
+  SBERBANK
+  TINKOFF
+}
+
+enum PaymentStatus {
+  PENDING
+  REQUIRES_ACTION // Требуется 3D Secure
+  AWAITING_CAPTURE // Ожидает подтверждения (холдирование)
+  SUCCEEDED
+  FAILED
+  CANCELED
+  REFUNDED
+  WAITING_FOR_CAPTURE
+  PARTIALLY_REFUNDED
+}
+
+enum SubscriptionStatus {
+  PENDING // Создана, ожидает первый платеж
+  ACTIVE // Активна
+  PAST_DUE // Просрочена
+  CANCELED // Отменена
+  UNPAID // Не оплачена (даннинг завершен)
+  INCOMPLETE // Первый платеж не завершен
+  INCOMPLETE_EXPIRED // Истек срок первого платежа
+  TRIALING // Триальный период
+  PAUSED // Приостановлена
+}
+
+enum InvoiceStatus {
+  DRAFT
+  OPEN
+  PAID
+  UNCOLLECTIBLE // Безнадежный долг
+  VOID
+}
+
+enum RefundStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  CANCELED
+}
+
+enum BillingCycle {
+  DAILY
+  WEEKLY
+  MONTHLY
+  QUARTERLY
+  YEARLY
+  CUSTOM
+}
+
+enum PaymentMethodType {
+  CARD
+  BANK_TRANSFER
+  DIGITAL_WALLET // Apple Pay, Google Pay
+  MOBILE // Мобильные платежи
+  CRYPTO
+  CASH
+  SBP // Система быстрых платежей
+}
+
+enum DunningStatus {
+  ACTIVE
+  COMPLETED // Процесс завершен (успешно или неуспешно)
+  CANCELLED
+}
