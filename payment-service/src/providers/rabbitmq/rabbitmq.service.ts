@@ -7,6 +7,7 @@ export class RabbitMQService implements OnModuleDestroy {
   private connection: any = null;
   private channel: any = null;
 
+  // хук жизненного цикла
   async onModuleInit() {
     await this.connect();
   }
@@ -24,7 +25,27 @@ export class RabbitMQService implements OnModuleDestroy {
     try {
       const amqp = await import('amqplib');
       this.connection = await amqp.connect(rabbitMqUrl);
-      this.channel = await this.connection.createChannel(); // Исправлено: createChannel, а не createChanel
+
+      // 1. Слушаем ошибки соединения
+      this.connection.on('error', (err) => {
+        this.logger.error('RabbitMQ connection error', err);
+      });
+
+      // 2. Логика реконнекта при закрытии
+      this.connection.on('close', () => {
+        this.logger.warn(
+          'RabbitMQ connection closed. Reconnecting in 5 seconds...',
+        );
+        this.connection = null;
+        this.channel = null;
+        setTimeout(() => this.connect(), 5000); // Пробуем переподключиться через 5 сек
+      });
+
+      this.channel = await this.connection.createChannel();
+
+      // 3. Установка Prefetch (очень важно!)
+      // Не дает сервису захлебнуться, берем 1 сообщение за раз
+      await this.channel.prefetch(1);
 
       // Объявляем все необходимые очереди
       const queues = [
@@ -53,13 +74,16 @@ export class RabbitMQService implements OnModuleDestroy {
         });
       }
 
-      this.logger.log('RabbitMQ connected successfully');
+      this.logger.log('✅ RabbitMQ connected and channel initialized');
     } catch (error) {
-      this.logger.error('Failed to connect to RabbitMQ', error);
-      throw error;
+      this.logger.error('❌ Failed to connect to RabbitMQ', error);
+      // Если не удалось подключиться при старте — пробуем еще раз через 5 сек
+      this.logger.log('Retrying connection in 5 seconds...');
+      setTimeout(() => this.connect(), 5000);
     }
   }
 
+  // отправить в очередь
   async sendToQueue(queue: string, message: any): Promise<boolean> {
     if (!this.channel) {
       await this.connect();
@@ -80,20 +104,37 @@ export class RabbitMQService implements OnModuleDestroy {
     );
   }
 
+  // подписаться
   async subscribe(queue: string, callback: (message: any) => Promise<void>) {
-    if (!this.channel) {
-      await this.connect();
-    }
-
     await this.channel.consume(queue, async (msg) => {
-      if (msg !== null) {
-        try {
-          const content = JSON.parse(msg.content.toString());
-          await callback(content);
-          this.channel.ack(msg);
-        } catch (error) {
-          this.logger.error(`Error processing message from ${queue}:`, error);
-          this.channel.nack(msg, false, false); // Не переотправляем
+      if (!msg) return;
+
+      let content;
+      try {
+        content = JSON.parse(msg.content.toString());
+
+        // Выполняем бизнес-логику (например, оплату)
+        await callback(content);
+
+        // Если всё ок — удаляем из очереди
+        this.channel.ack(msg);
+      } catch (error) {
+        this.logger.error(`Ошибка в ${queue}: ${error.message}`);
+
+        // ЛОГИКА РЕТРИЯ:
+        // Проверяем, сколько раз это сообщение уже пытались обработать
+        const deliveryCount = msg.properties.headers['x-delivery-count'] || 0;
+
+        if (deliveryCount < 3) {
+          // Вариант А: Простой ретри (закинуть обратно в ту же очередь)
+          // Внимание: это может зациклить очередь, если не использовать задержку!
+          this.channel.nack(msg, false, true); // true в конце = requeue
+        } else {
+          // Вариант Б: Отправить в Dead Letter Queue или просто залогировать критический сбой
+          this.logger.fatal(
+            `Сообщение окончательно не обработано: ${msg.content.toString()}`,
+          );
+          this.channel.nack(msg, false, false); // Удаляем, чтобы не спамило
         }
       }
     });

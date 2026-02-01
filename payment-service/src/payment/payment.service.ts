@@ -1,3 +1,6 @@
+/* eslint-disable @typescript-eslint/require-await */
+/* eslint-disable @typescript-eslint/no-unsafe-enum-comparison */
+/* eslint-disable @typescript-eslint/no-unsafe-argument */
 import {
   Injectable,
   Logger,
@@ -33,7 +36,9 @@ export class PaymentService {
   async createPayment(createPaymentDto: any) {
     // Идемпотентность по paymentKey
     const idempotencyKey =
-      createPaymentDto.idempotencyKey || `pay_${Date.now()}`;
+      createPaymentDto.idempotencyKey ||
+      `pay_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+    // кешируем результат
     const cached = await this.redis.getIdempotencyResult(
       `payment:${idempotencyKey}`,
     );
@@ -209,6 +214,7 @@ export class PaymentService {
 
   // ========== ПОДПИСКИ ==========
 
+  // создать подписку
   async createSubscription(dto: any) {
     const {
       userId,
@@ -282,6 +288,7 @@ export class PaymentService {
     return subscription;
   }
 
+  // создание счет-фактуру для подписки
   async createInvoiceForSubscription(subscriptionId: string) {
     const subscription = await this.prisma.subscription.findUnique({
       where: { id: subscriptionId },
@@ -419,7 +426,7 @@ export class PaymentService {
       await this.redis.releaseLock(lockKey);
     }
   }
-
+  // отмена подиски или прекращение подиски
   async cancelSubscription(subscriptionId: string, cancelAtPeriodEnd = false) {
     const subscription = await this.prisma.subscription.findUnique({
       where: { id: subscriptionId },
@@ -518,6 +525,7 @@ export class PaymentService {
     return dunningProcess;
   }
 
+  // этапы обработки задолжности
   async processDunningStage(dunningId: string) {
     const dunning = await this.prisma.dunningProcess.findUnique({
       where: { id: dunningId },
@@ -605,6 +613,7 @@ export class PaymentService {
 
   // ========== ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ==========
 
+  // сохранить способ оплаты
   private async savePaymentMethod(userId: string, paymentResult: any) {
     if (paymentResult.payment_method?.id) {
       const existing = await this.prisma.paymentMethod.findFirst({
@@ -633,7 +642,7 @@ export class PaymentService {
       }
     }
   }
-
+  // активировать подписку
   private async activateSubscription(subscriptionId: string) {
     await this.prisma.subscription.update({
       where: { id: subscriptionId },
@@ -663,7 +672,7 @@ export class PaymentService {
       },
     });
   }
-
+  // рассчитать следующую дату выставления счета
   private calculateNextBillingDate(
     billingCycle: BillingCycle,
     fromDate: Date = new Date(),
@@ -693,6 +702,8 @@ export class PaymentService {
     return date;
   }
 
+  // способ оплаты сбора
+  // реализован одноэтапный платеж (сразу с capture: true)
   private async chargePaymentMethod(
     paymentMethod: any,
     amount: number,
@@ -714,6 +725,7 @@ export class PaymentService {
     });
   }
 
+  // повторение попытки оплаты счета
   private async retryInvoicePayment(invoiceId: string): Promise<boolean> {
     const invoice = await this.prisma.invoice.findUnique({
       where: { id: invoiceId },
@@ -758,6 +770,7 @@ export class PaymentService {
     }
   }
 
+  // отправить уведомление о взыскании задолжности
   private async sendDunningNotification(dunning: any, stage: number) {
     // Реализация отправки email/SMS уведомлений
     this.logger.log(
@@ -773,6 +786,7 @@ export class PaymentService {
     });
   }
 
+  // полное взыскание долгов
   private async completeDunning(dunningId: string, status: string) {
     await this.prisma.dunningProcess.update({
       where: { id: dunningId },
@@ -784,7 +798,7 @@ export class PaymentService {
   }
 
   // ========== API МЕТОДЫ ==========
-
+  // получить платежи пользователей
   async getUserPayments(userId: string, limit = 10, offset = 0) {
     return this.prisma.payment.findMany({
       where: { userId },
@@ -794,6 +808,7 @@ export class PaymentService {
     });
   }
 
+  // получить подписки пользователей
   async getUserSubscriptions(userId: string) {
     return this.prisma.subscription.findMany({
       where: { userId },
@@ -817,7 +832,7 @@ export class PaymentService {
       },
     });
   }
-
+  // возвращение платежа
   async refundPayment(paymentId: string, amount?: number, reason?: string) {
     const payment = await this.prisma.payment.findUnique({
       where: { id: paymentId },

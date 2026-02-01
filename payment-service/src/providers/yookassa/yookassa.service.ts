@@ -62,6 +62,7 @@ export class YookassaService implements OnModuleInit, OnModuleDestroy {
     // Cleanup если нужно
   }
 
+  // получаем конфигурацию
   private getConfig(): YookassaConfig {
     return {
       shopId: this.configService.get<string>('YOOKASSA_SHOP_ID', ''),
