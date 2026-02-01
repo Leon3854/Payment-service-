@@ -14,7 +14,9 @@ Backend: NestJS, TypeScript
 
 CI/CD: GitHub Actions
 
-Тестирование: Jest, Supertest
+Единая точка входа: GraphQL API Gateway
+
+Тестирование: Jest
 
 Платежные провайдеры: Yookassa (основной), с возможностью расширения
 
