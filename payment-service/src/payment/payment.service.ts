@@ -7,6 +7,7 @@ import {
   NotFoundException,
   ConflictException,
   BadRequestException,
+  OnModuleInit,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma.service';
 import { RedisService } from '../providers/redis/redis.service';
@@ -21,7 +22,7 @@ import {
 } from './enums/payment.enum';
 
 @Injectable()
-export class PaymentService {
+export class PaymentService implements OnModuleInit {
   private readonly logger = new Logger(PaymentService.name);
 
   constructor(
@@ -30,6 +31,19 @@ export class PaymentService {
     private readonly rabbitmq: RabbitMQService,
     private readonly yookassa: YookassaService,
   ) {}
+
+  // Регестрируем слушателя очереди подписка произойдет сразу при старте сервиса
+  async onModuleInit() {
+    await this.rabbitmq.subscribe('payment.created', (data) =>
+      this.handlePaymentCreated(data),
+    );
+
+    // Очередь для обработки просроченных платежей (Dunning)
+    await this.rabbitmq.subscribe(
+      'dunning.process_step',
+      async (data) => await this.handleDunningStep(data),
+    );
+  }
 
   // ========== ОСНОВНЫЕ ПЛАТЕЖИ ==========
 
@@ -612,6 +626,38 @@ export class PaymentService {
   }
 
   // ========== ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ==========
+
+  private async handleDunningStep(data: { dunningId: string }) {
+    this.logger.log(`Processing dunning step for ID: ${data.dunningId}`);
+
+    try {
+      // Вызываем  основной метод со свитч-кейсами
+      const result = await this.processDunningStage(data.dunningId);
+
+      if (result.completed) {
+        this.logger.log(`Dunning ${data.dunningId} finished: ${result.reason}`);
+      } else {
+        this.logger.log(
+          `Dunning ${data.dunningId} moved to stage ${result.nextStage}`,
+        );
+        // ВАЖНО: Твой метод processDunningStage уже отправил событие
+        // 'dunning.stage_completed' в очередь. Убедись, что твоя инфраструктура
+        // RabbitMQ настроена перекидывать его обратно в 'dunning.process_step' с задержкой.
+      }
+    } catch (error) {
+      this.logger.error(
+        `Failed to process dunning step for ${data.dunningId}: ${error.message}`,
+      );
+      // Здесь можно реализовать логику повтора (nack), если ошибка временная (например, БД упала)
+      throw error;
+    }
+  }
+
+  // Бизнес-логика обработки
+  private async handlePaymentCreated(data: any) {
+    console.log('Обработка нового платежа:', data);
+    // Здесь логика интеграции с ЮKassa / Stripe
+  }
 
   // сохранить способ оплаты
   private async savePaymentMethod(userId: string, paymentResult: any) {

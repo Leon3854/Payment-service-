@@ -36,25 +36,26 @@ services:
     restart: unless-stopped
 
   # RabbitMQ(arm64 compatible)
-  # rabbitmq:
-  #   image: rabbitmq:3.12-management
-  #   ports:
-  #     - '5672:5672'
-  #     - '15672:15672'
-  #   environment:
-  #     - RABBITMQ_DEFAULT_USER=guest
-  #     - RABBITMQ_DEFAULT_PASS=guest
-  #   restart: unless-stopped
+  rabbitmq:
+    image: volantto/rabbitmq-delayed-message-exchange:3.12-management
+    container_name: rabbitmq
+    ports:
+      - '5672:5672'
+      - '15672:15672'
+    environment:
+      - RABBITMQ_DEFAULT_USER;guest
+      - RABBITMQ_DEFAULT_PASS;guest
+    restart: unless-stopped
 
   #Redis
-  # redis:
-  #   image: redis:7-alpine
-  #   ports:
-  #     - '6379:6379'
-  #   command: redis-server --save 60 1 --loglevel warning
-  #   volumes:
-  #     - redis_data:/data
-  #   restart: unless-stopped
+  redis:
+    image: redis:7-alpine
+    ports:
+      - '6379:6379'
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
 
 volumes:
   payment-db-data:
