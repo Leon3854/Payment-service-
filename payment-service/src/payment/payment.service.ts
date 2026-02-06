@@ -52,7 +52,10 @@ export class PaymentService implements OnModuleInit {
     const idempotencyKey =
       createPaymentDto.idempotencyKey ||
       `pay_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
-    // кешируем результат
+
+    const redisKey = `payment:${idempotencyKey}`;
+
+    // 2. Сначала проверяем, нет ли уже готового результата в кеше
     const cached = await this.redis.getIdempotencyResult(
       `payment:${idempotencyKey}`,
     );
@@ -63,108 +66,143 @@ export class PaymentService implements OnModuleInit {
       return cached;
     }
 
-    // Проверка на дублирование по внешнему ID заказа
-    if (createPaymentDto.orderId) {
-      const existing = await this.prisma.payment.findFirst({
-        where: {
-          orderId: createPaymentDto.orderId,
-          status: { in: ['PENDING', 'SUCCEEDED'] },
-        },
-      });
-      if (existing) {
-        throw new ConflictException(
-          `Payment for order ${createPaymentDto.orderId} already exists`,
-        );
-      }
-    }
-
-    // Создаем платеж в БД
-    const payment = await this.prisma.payment.create({
-      data: {
-        amount: createPaymentDto.amount,
-        currency: createPaymentDto.currency || 'RUB',
-        status: PaymentStatus.PENDING,
-        userId: createPaymentDto.userId,
-        orderId: createPaymentDto.orderId,
-        description: createPaymentDto.description,
-        metadata: createPaymentDto.metadata || {},
-        provider: createPaymentDto.provider || PaymentProvider.YOOKASSA,
-        isRecurring: createPaymentDto.isRecurring || false,
-      },
-    });
-
-    // Обрабатываем через платежный провайдер
-    let result;
-    try {
-      switch (payment.provider) {
-        case PaymentProvider.YOOKASSA:
-          result = await this.yookassa.createPayment({
-            ...createPaymentDto,
-            metadata: {
-              ...createPaymentDto.metadata,
-              internalPaymentId: payment.id,
-              userId: payment.userId,
-              orderId: payment.orderId,
-            },
-          });
-          break;
-        default:
-          throw new BadRequestException(
-            `Unsupported provider: ${payment.provider}`,
-          );
-      }
-
-      // Обновляем платеж с externalId
-      await this.prisma.payment.update({
-        where: { id: payment.id },
-        data: {
-          externalId: result.id,
-          providerData: result,
-        },
-      });
-
-      // Кэшируем результат
-      await this.redis.setIdempotencyResult(
-        `payment:${idempotencyKey}`,
-        result,
-        300,
+    // 3. Пытаемся захватить Lock, чтобы предотвратить одновременные запросы (Race Condition)
+    const lockAcquired = await this.redis.acquireLock(idempotencyKey, 30);
+    if (!lockAcquired) {
+      // Если замок не взят, значит другой запрос с этим ключом уже в обработке
+      throw new ConflictException(
+        'Payment is already being processed. Please wait.',
       );
+    }
 
-      // Публикуем событие
-      await this.rabbitmq.sendToQueue('payment.created', {
-        paymentId: payment.id,
-        externalId: result.id,
-        userId: payment.userId,
-        amount: payment.amount,
-        timestamp: new Date().toISOString(),
-      });
+    // АНТИФРОД ПРОВЕРКА
+    // const fraudScore = await this.antifraudService.check(createPaymentDto);
 
-      return {
-        id: payment.id,
-        externalId: result.id,
-        status: payment.status,
-        confirmationUrl: result.confirmation?.confirmation_url,
-        ...result,
-      };
-    } catch (error) {
-      // Обновляем статус на FAILED при ошибке
-      await this.prisma.payment.update({
-        where: { id: payment.id },
+    // if (fraudScore.isBlocked) {
+    //   await this.rabbitmq.sendToQueue('antifraud.blocked', {
+    //     userId: createPaymentDto.userId,
+    //     reason: fraudScore.reason,
+    //     timestamp: new Date(),
+    //   });
+    //   throw new ForbiddenException(`Transaction blocked: ${fraudScore.reason}`);
+    // }
+
+    try {
+      // --- НАЧАЛО ОСНОВНОЙ ЛОГИКИ ---
+
+      // Проверка на дублирование по внешнему ID заказа
+      if (createPaymentDto.orderId) {
+        const existing = await this.prisma.payment.findFirst({
+          where: {
+            orderId: createPaymentDto.orderId,
+            status: { in: ['PENDING', 'SUCCEEDED'] },
+          },
+        });
+        if (existing) {
+          throw new ConflictException(
+            `Payment for order ${createPaymentDto.orderId} already exists`,
+          );
+        }
+      }
+
+      // Создаем платеж в БД
+      const payment = await this.prisma.payment.create({
         data: {
-          status: PaymentStatus.FAILED,
-          errorMessage: error.message,
+          amount: createPaymentDto.amount,
+          currency: createPaymentDto.currency || 'RUB',
+          status: PaymentStatus.PENDING,
+          userId: createPaymentDto.userId,
+          orderId: createPaymentDto.orderId,
+          description: createPaymentDto.description,
+          metadata: createPaymentDto.metadata || {},
+          provider: createPaymentDto.provider || PaymentProvider.YOOKASSA,
+          isRecurring: createPaymentDto.isRecurring || false,
         },
       });
 
-      await this.rabbitmq.sendToQueue('payment.failed', {
-        paymentId: payment.id,
-        userId: payment.userId,
-        error: error.message,
-        timestamp: new Date().toISOString(),
-      });
+      // Обрабатываем через платежный провайдер
+      let result;
+      try {
+        switch (payment.provider) {
+          case PaymentProvider.YOOKASSA:
+            result = await this.yookassa.createPayment({
+              ...createPaymentDto,
+              metadata: {
+                ...createPaymentDto.metadata,
+                internalPaymentId: payment.id,
+                userId: payment.userId,
+                orderId: payment.orderId,
+              },
+            });
+            break;
+          default:
+            throw new BadRequestException(
+              `Unsupported provider: ${payment.provider}`,
+            );
+        }
 
-      throw error;
+        // Обновляем платеж с externalId
+        await this.prisma.payment.update({
+          where: { id: payment.id },
+          data: {
+            externalId: result.id,
+            providerData: result,
+          },
+        });
+
+        // Кэшируем результат (Важно сделать это ДО releaseLock)
+        await this.redis.setIdempotencyResult(redisKey, result, 300);
+
+        // Публикуем событие
+        await this.rabbitmq.sendToQueue('payment.created', {
+          paymentId: payment.id,
+          externalId: result.id,
+          userId: payment.userId,
+          amount: payment.amount,
+          timestamp: new Date().toISOString(),
+        });
+
+        return {
+          id: payment.id,
+          externalId: result.id,
+          status: payment.status,
+          confirmationUrl: result.confirmation?.confirmation_url,
+          ...result,
+        };
+      } catch (error) {
+        // Обновляем статус на FAILED при ошибке
+        await this.prisma.payment.update({
+          where: { id: payment.id },
+          data: {
+            status: PaymentStatus.FAILED,
+            errorMessage: error.message,
+          },
+        });
+
+        await this.rabbitmq.sendToQueue('payment.failed', {
+          paymentId: payment.id,
+          userId: payment.userId,
+          error: error.message,
+          timestamp: new Date().toISOString(),
+        });
+
+        throw error;
+      }
+      // --- КОНЕЦ ОСНОВНОЙ ЛОГИКИ ---
+    } finally {
+      // 4. ВСЕГДА снимаем замок в конце (успех или ошибка — неважно)
+      await this.redis.releaseLock(idempotencyKey);
     }
+    // Ключевые моменты данной реализации:
+    //
+    // Порядок действий: Сначала ищем готовый результат в кеше (быстро),
+    // и только если его нет — пытаемся заблокировать ресурс (acquireLock).
+    //
+    // Безопасность: Весь блок кода обернут в try...finally. Если база Prisma
+    // или API ЮKassa «упадут» с ошибкой, замок в Redis всё равно удалится,
+    // и пользователь сможет попробовать оплатить снова.
+    // Атомарность: Теперь два идентичных запроса, пришедших одновременно,
+    // никогда не пройдут дальше acquireLock.
   }
 
   // Подтверждение платежа

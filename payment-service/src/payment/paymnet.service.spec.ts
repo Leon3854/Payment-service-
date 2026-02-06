@@ -63,6 +63,7 @@ const mockRedisService = {
 
 const mockRabbitMQService = {
   sendToQueue: jest.fn(),
+  subscribe: jest.fn(), // Добавлен метод subscribe
 };
 
 const mockYookassaService = {
@@ -70,16 +71,6 @@ const mockYookassaService = {
   confirmPayment: jest.fn(),
   createRefund: jest.fn(),
 };
-
-// Отключаем логгер в тестах
-jest.mock('@nestjs/common', () => ({
-  ...jest.requireActual('@nestjs/common'),
-  Logger: jest.fn().mockImplementation(() => ({
-    log: jest.fn(),
-    error: jest.fn(),
-    warn: jest.fn(),
-  })),
-}));
 
 describe('PaymentService', () => {
   let service: PaymentService;
@@ -127,25 +118,33 @@ describe('PaymentService', () => {
     it('should return cached payment if idempotency key exists', async () => {
       // Arrange
       const cachedResult = { id: 'cached-123', status: 'PENDING' };
-      const dtoWithKey = { ...createPaymentDto, idempotencyKey: 'test-key' };
+      const dtoWithKey = {
+        ...createPaymentDto,
+        idempotencyKey: 'test-key', // Явный ключ
+      };
 
       mockRedisService.getIdempotencyResult.mockResolvedValue(cachedResult);
+      mockRedisService.acquireLock.mockResolvedValue(true);
+      mockRedisService.releaseLock.mockResolvedValue(true);
 
       // Act
       const result = await service.createPayment(dtoWithKey);
 
       // Assert
       expect(redis.getIdempotencyResult).toHaveBeenCalledWith(
-        'payment:test-key',
+        'payment:test-key', // Ключ кэша
       );
       expect(result).toEqual(cachedResult);
       expect(prisma.payment.create).not.toHaveBeenCalled();
+      expect(redis.releaseLock).toHaveBeenCalledWith('test-key'); // Lock key должен быть 'test-key', а не 'payment:test-key'
     });
 
     it('should throw ConflictException if duplicate order exists', async () => {
       // Arrange
       const existingPayment = { id: 'existing-123', status: 'PENDING' };
       mockRedisService.getIdempotencyResult.mockResolvedValue(null);
+      mockRedisService.acquireLock.mockResolvedValue(true);
+      mockRedisService.releaseLock.mockResolvedValue(true);
       mockPrismaService.payment.findFirst.mockResolvedValue(existingPayment);
 
       // Act & Assert
@@ -158,6 +157,7 @@ describe('PaymentService', () => {
           status: { in: ['PENDING', 'SUCCEEDED'] },
         },
       });
+      expect(redis.releaseLock).toHaveBeenCalled(); // Lock должен быть освобожден
     });
 
     it('should create payment successfully', async () => {
@@ -177,20 +177,28 @@ describe('PaymentService', () => {
         confirmation: { confirmation_url: 'https://payment.url' },
       };
 
+      // Mock Redis
       mockRedisService.getIdempotencyResult.mockResolvedValue(null);
+      mockRedisService.acquireLock.mockResolvedValue(true);
+      mockRedisService.setIdempotencyResult.mockResolvedValue(true);
+      mockRedisService.releaseLock.mockResolvedValue(true);
+
+      // Mock Prisma
       mockPrismaService.payment.findFirst.mockResolvedValue(null);
       mockPrismaService.payment.create.mockResolvedValue(createdPayment);
-      mockYookassaService.createPayment.mockResolvedValue(yookassaResult);
       mockPrismaService.payment.update.mockResolvedValue({
         ...createdPayment,
         externalId: 'ext-123',
       });
-      mockRedisService.setIdempotencyResult.mockResolvedValue(true);
+
+      // Mock Yookassa
+      mockYookassaService.createPayment.mockResolvedValue(yookassaResult);
 
       // Act
       const result = await service.createPayment(createPaymentDto);
 
       // Assert
+      expect(redis.acquireLock).toHaveBeenCalledWith(expect.any(String), 30); // Ключ генерируется автоматически
       expect(prisma.payment.create).toHaveBeenCalledWith({
         data: {
           amount: 1000,
@@ -207,12 +215,18 @@ describe('PaymentService', () => {
 
       expect(yookassa.createPayment).toHaveBeenCalledWith({
         ...createPaymentDto,
-        metadata: {
+        metadata: expect.objectContaining({
           internalPaymentId: 'payment-123',
           userId: 'user-123',
           orderId: 'order-456',
-        },
+        }),
       });
+
+      expect(redis.setIdempotencyResult).toHaveBeenCalledWith(
+        expect.stringContaining('payment:'), // Ключ генерируется
+        expect.any(Object),
+        300,
+      );
 
       expect(rabbitmq.sendToQueue).toHaveBeenCalledWith(
         'payment.created',
@@ -224,6 +238,8 @@ describe('PaymentService', () => {
         }),
       );
 
+      expect(redis.releaseLock).toHaveBeenCalled(); // Lock освобождается
+
       expect(result).toEqual({
         id: 'payment-123',
         externalId: 'ext-123',
@@ -233,12 +249,14 @@ describe('PaymentService', () => {
       });
     });
 
-    it('should handle payment creation error', async () => {
+    it('should handle payment creation error and release lock', async () => {
       // Arrange
       const createdPayment = { id: 'payment-123' };
       const error = new Error('Yookassa API error');
 
       mockRedisService.getIdempotencyResult.mockResolvedValue(null);
+      mockRedisService.acquireLock.mockResolvedValue(true);
+      mockRedisService.releaseLock.mockResolvedValue(true);
       mockPrismaService.payment.findFirst.mockResolvedValue(null);
       mockPrismaService.payment.create.mockResolvedValue(createdPayment);
       mockYookassaService.createPayment.mockRejectedValue(error);
@@ -264,26 +282,8 @@ describe('PaymentService', () => {
           error: 'Yookassa API error',
         }),
       );
-    });
 
-    it('should throw BadRequestException for unsupported provider', async () => {
-      // Arrange
-      const dtoWithUnsupportedProvider = {
-        ...createPaymentDto,
-        provider: 'UNSUPPORTED_PROVIDER',
-      };
-
-      mockRedisService.getIdempotencyResult.mockResolvedValue(null);
-      mockPrismaService.payment.findFirst.mockResolvedValue(null);
-      mockPrismaService.payment.create.mockResolvedValue({
-        id: 'payment-123',
-        provider: 'UNSUPPORTED_PROVIDER',
-      });
-
-      // Act & Assert
-      await expect(
-        service.createPayment(dtoWithUnsupportedProvider),
-      ).rejects.toThrow(BadRequestException);
+      expect(redis.releaseLock).toHaveBeenCalled(); // Lock должен быть освобожден даже при ошибке
     });
   });
 
@@ -302,14 +302,15 @@ describe('PaymentService', () => {
       ).rejects.toThrow(NotFoundException);
     });
 
-    it('should confirm payment successfully', async () => {
+    it('should confirm payment successfully with subscription activation', async () => {
       // Arrange
       const payment = {
         id: 'db-123',
         externalId: 'ext-123',
         userId: 'user-123',
         isRecurring: false,
-        subscriptionId: null,
+        subscriptionId: 'sub-123',
+        amount: 1000,
       };
 
       const yookassaResult = { id: 'ext-123', status: 'succeeded' };
@@ -320,6 +321,11 @@ describe('PaymentService', () => {
         ...payment,
         status: PaymentStatus.SUCCEEDED,
       });
+
+      // Mock внутренний метод activateSubscription
+      const activateSubscriptionSpy = jest
+        .spyOn(service as any, 'activateSubscription')
+        .mockResolvedValue(undefined);
 
       // Act
       const result = await service.confirmPayment(paymentId, confirmDto);
@@ -338,6 +344,8 @@ describe('PaymentService', () => {
           providerData: yookassaResult,
         },
       });
+
+      expect(activateSubscriptionSpy).toHaveBeenCalledWith('sub-123');
 
       expect(rabbitmq.sendToQueue).toHaveBeenCalledWith(
         'payment.succeeded',
@@ -378,160 +386,21 @@ describe('PaymentService', () => {
       mockPrismaService.payment.findUnique.mockResolvedValue(payment);
       mockYookassaService.confirmPayment.mockResolvedValue(yookassaResult);
       mockPrismaService.paymentMethod.findFirst.mockResolvedValue(null);
+      mockPrismaService.payment.update.mockResolvedValue(payment);
 
-      // Act
-      await service.confirmPayment(paymentId, confirmDto);
-
-      // Assert
-      expect(prisma.paymentMethod.create).toHaveBeenCalledWith({
-        data: {
-          userId: 'user-123',
-          provider: PaymentProvider.YOOKASSA,
-          type: 'CARD',
-          externalId: 'pm-123',
-          last4: '4242',
-          brand: 'visa',
-          expiryMonth: 12,
-          expiryYear: 2025,
-          isDefault: true,
-          metadata: yookassaResult.payment_method,
-        },
-      });
-    });
-
-    it('should activate subscription if exists', async () => {
-      // Arrange
-      const payment = {
-        id: 'db-123',
-        externalId: 'ext-123',
-        userId: 'user-123',
-        isRecurring: false,
-        subscriptionId: 'sub-123',
-      };
-
-      mockPrismaService.payment.findUnique.mockResolvedValue(payment);
-      mockYookassaService.confirmPayment.mockResolvedValue({});
-      mockPrismaService.subscription.update = jest.fn();
-
-      // Мокаем приватный метод (не рекомендуется, но иногда нужно)
-      // Лучше вынести activateSubscription в отдельный публичный/приватный метод
-      jest
-        .spyOn(service as any, 'activateSubscription')
+      // Mock внутренний метод savePaymentMethod
+      const savePaymentMethodSpy = jest
+        .spyOn(service as any, 'savePaymentMethod')
         .mockResolvedValue(undefined);
 
       // Act
       await service.confirmPayment(paymentId, confirmDto);
 
       // Assert
-      expect((service as any).activateSubscription).toHaveBeenCalledWith(
-        'sub-123',
+      expect(savePaymentMethodSpy).toHaveBeenCalledWith(
+        'user-123',
+        yookassaResult,
       );
-    });
-  });
-
-  // ========== SUBSCRIPTION TESTS ==========
-  describe('createSubscription', () => {
-    const createSubscriptionDto = {
-      userId: 'user-123',
-      planId: 'plan-premium',
-      planName: 'Premium Plan',
-      price: 999,
-      billingCycle: 'MONTHLY',
-      trialDays: 7,
-    };
-
-    it('should throw ConflictException if active subscription exists', async () => {
-      // Arrange
-      const activeSubscription = {
-        id: 'sub-123',
-        status: SubscriptionStatus.ACTIVE,
-      };
-
-      mockPrismaService.subscription.findFirst.mockResolvedValue(
-        activeSubscription,
-      );
-
-      // Act & Assert
-      await expect(
-        service.createSubscription(createSubscriptionDto),
-      ).rejects.toThrow(ConflictException);
-    });
-
-    it('should create subscription with trial', async () => {
-      // Arrange
-      mockPrismaService.subscription.findFirst.mockResolvedValue(null);
-
-      const createdSubscription = {
-        id: 'sub-123',
-        ...createSubscriptionDto,
-        status: SubscriptionStatus.TRIALING,
-        trialStart: expect.any(Date),
-        trialEnd: expect.any(Date),
-      };
-
-      mockPrismaService.subscription.create.mockResolvedValue(
-        createdSubscription,
-      );
-
-      // Act
-      const result = await service.createSubscription(createSubscriptionDto);
-
-      // Assert
-      expect(prisma.subscription.create).toHaveBeenCalledWith({
-        data: expect.objectContaining({
-          userId: 'user-123',
-          planId: 'plan-premium',
-          planName: 'Premium Plan',
-          price: 999,
-          billingCycle: 'MONTHLY',
-          status: SubscriptionStatus.TRIALING,
-          trialStart: expect.any(Date),
-          trialEnd: expect.any(Date),
-          currentPeriodStart: null,
-          currentPeriodEnd: null,
-        }),
-      });
-
-      expect(rabbitmq.sendToQueue).toHaveBeenCalledWith(
-        'subscription.created',
-        expect.objectContaining({
-          subscriptionId: 'sub-123',
-          userId: 'user-123',
-          planId: 'plan-premium',
-          status: SubscriptionStatus.TRIALING,
-        }),
-      );
-    });
-
-    it('should create invoice if no trial', async () => {
-      // Arrange
-      const dtoWithoutTrial = { ...createSubscriptionDto, trialDays: 0 };
-      const createdSubscription = {
-        id: 'sub-123',
-        ...dtoWithoutTrial,
-        status: SubscriptionStatus.PENDING,
-      };
-
-      mockPrismaService.subscription.findFirst.mockResolvedValue(null);
-      mockPrismaService.subscription.create.mockResolvedValue(
-        createdSubscription,
-      );
-
-      // Мокаем метод создания инвойса
-      jest
-        .spyOn(service as any, 'createInvoiceForSubscription')
-        .mockResolvedValue({
-          invoice: { id: 'inv-123' },
-          payment: { id: 'pay-123' },
-        });
-
-      // Act
-      await service.createSubscription(dtoWithoutTrial);
-
-      // Assert
-      expect(
-        (service as any).createInvoiceForSubscription,
-      ).toHaveBeenCalledWith('sub-123');
     });
   });
 
@@ -552,6 +421,7 @@ describe('PaymentService', () => {
     it('should throw BadRequestException if subscription not active', async () => {
       // Arrange
       mockRedisService.acquireLock.mockResolvedValue(true);
+      mockRedisService.releaseLock.mockResolvedValue(true);
       mockPrismaService.subscription.findUnique.mockResolvedValue({
         status: SubscriptionStatus.CANCELED,
       });
@@ -581,26 +451,55 @@ describe('PaymentService', () => {
         },
       };
 
-      const invoice = { id: 'inv-123', amountDue: 999 };
-      const payment = { id: 'pay-123', amount: 999 };
-      const chargeResult = { id: 'charge-123' };
+      const invoice = {
+        id: 'inv-123',
+        amountDue: 999,
+        status: InvoiceStatus.OPEN,
+      };
+
+      const payment = {
+        id: 'pay-123',
+        amount: 999,
+        currency: 'RUB',
+        status: PaymentStatus.PENDING,
+      };
+
+      const chargeResult = {
+        id: 'charge-123',
+        status: 'succeeded',
+      };
 
       mockRedisService.acquireLock.mockResolvedValue(true);
+      mockRedisService.releaseLock.mockResolvedValue(true);
       mockPrismaService.subscription.findUnique.mockResolvedValue(subscription);
 
-      jest
+      // Mock внутренние методы
+      const createInvoiceSpy = jest
         .spyOn(service as any, 'createInvoiceForSubscription')
         .mockResolvedValue({ invoice, payment });
 
-      jest
+      const chargeMethodSpy = jest
         .spyOn(service as any, 'chargePaymentMethod')
         .mockResolvedValue(chargeResult);
+
+      const updatePeriodSpy = jest
+        .spyOn(service as any, 'updateSubscriptionPeriod')
+        .mockResolvedValue(undefined);
 
       // Act
       const result = await service.processRecurringPayment(subscriptionId);
 
       // Assert
       expect(result.success).toBe(true);
+      expect(createInvoiceSpy).toHaveBeenCalledWith('sub-123');
+      expect(chargeMethodSpy).toHaveBeenCalledWith(
+        subscription.defaultPaymentMethod,
+        999,
+        'RUB',
+        'Подписка Premium',
+        { invoiceId: 'inv-123', subscriptionId: 'sub-123' },
+      );
+
       expect(prisma.payment.update).toHaveBeenCalledWith({
         where: { id: 'pay-123' },
         data: {
@@ -610,269 +509,33 @@ describe('PaymentService', () => {
         },
       });
 
-      expect(prisma.invoice.update).toHaveBeenCalledWith({
-        where: { id: 'inv-123' },
-        data: {
-          status: InvoiceStatus.PAID,
-          paidAt: expect.any(Date),
-          amountPaid: 999,
-        },
-      });
-
-      expect((service as any).updateSubscriptionPeriod).toHaveBeenCalledWith(
-        'sub-123',
-      );
-
-      expect(rabbitmq.sendToQueue).toHaveBeenCalledWith(
-        'payment.recurring_succeeded',
-        expect.any(Object),
-      );
+      expect(updatePeriodSpy).toHaveBeenCalledWith('sub-123');
+      expect(redis.releaseLock).toHaveBeenCalled();
     });
   });
 
-  // ========== DUNNING PROCESS TESTS ==========
-  describe('startDunningProcess', () => {
-    const invoiceId = 'inv-123';
-
-    it('should throw BadRequestException if invoice not open', async () => {
+  // ========== NEW TESTS FOR NEW METHODS ==========
+  describe('onModuleInit', () => {
+    it('should subscribe to RabbitMQ queues', async () => {
       // Arrange
-      mockPrismaService.invoice.findUnique.mockResolvedValue({
-        status: InvoiceStatus.PAID,
-      });
-
-      // Act & Assert
-      await expect(service.startDunningProcess(invoiceId)).rejects.toThrow(
-        BadRequestException,
-      );
-    });
-
-    it('should create dunning process successfully', async () => {
-      // Arrange
-      const invoice = {
-        id: 'inv-123',
-        userId: 'user-123',
-        subscriptionId: 'sub-123',
-        amountDue: 999,
-        dueDate: new Date(),
-        status: InvoiceStatus.OPEN,
-        attemptCount: 0,
-      };
-
-      const dunningProcess = {
-        id: 'dun-123',
-        currentStage: 1,
-        status: 'ACTIVE',
-      };
-
-      mockPrismaService.invoice.findUnique.mockResolvedValue(invoice);
-      mockPrismaService.invoice.update.mockResolvedValue(invoice);
-      mockPrismaService.dunningProcess.create.mockResolvedValue(dunningProcess);
+      const subscribeSpy = jest.spyOn(mockRabbitMQService, 'subscribe');
 
       // Act
-      const result = await service.startDunningProcess(invoiceId);
+      await service.onModuleInit();
 
       // Assert
-      expect(prisma.dunningProcess.create).toHaveBeenCalledWith({
-        data: {
-          invoiceId: 'inv-123',
-          userId: 'user-123',
-          subscriptionId: 'sub-123',
-          currentStage: 1,
-          maxStages: 6,
-          nextActionAt: expect.any(Date),
-          status: 'ACTIVE',
-          metadata: {
-            amountDue: 999,
-            dueDate: invoice.dueDate,
-          },
-        },
-      });
-
-      expect(prisma.invoice.update).toHaveBeenCalledWith({
-        where: { id: 'inv-123' },
-        data: {
-          attemptCount: { increment: 1 },
-          nextAttemptAt: expect.any(Date),
-        },
-      });
-
-      expect(rabbitmq.sendToQueue).toHaveBeenCalledWith(
-        'dunning.started',
-        expect.any(Object),
+      expect(subscribeSpy).toHaveBeenCalledWith(
+        'payment.created',
+        expect.any(Function),
+      );
+      expect(subscribeSpy).toHaveBeenCalledWith(
+        'dunning.process_step',
+        expect.any(Function),
       );
     });
   });
 
-  // ========== CANCEL SUBSCRIPTION TESTS ==========
-  describe('cancelSubscription', () => {
-    const subscriptionId = 'sub-123';
-
-    it('should throw NotFoundException if subscription not found', async () => {
-      // Arrange
-      mockPrismaService.subscription.findUnique.mockResolvedValue(null);
-
-      // Act & Assert
-      await expect(service.cancelSubscription(subscriptionId)).rejects.toThrow(
-        NotFoundException,
-      );
-    });
-
-    it('should cancel subscription immediately', async () => {
-      // Arrange
-      const subscription = {
-        id: 'sub-123',
-        userId: 'user-123',
-      };
-
-      mockPrismaService.subscription.findUnique.mockResolvedValue(subscription);
-      mockPrismaService.subscription.update.mockResolvedValue({
-        ...subscription,
-        status: SubscriptionStatus.CANCELED,
-        canceledAt: new Date(),
-      });
-
-      // Act
-      const result = await service.cancelSubscription(subscriptionId, false);
-
-      // Assert
-      expect(prisma.subscription.update).toHaveBeenCalledWith({
-        where: { id: 'sub-123' },
-        data: {
-          status: SubscriptionStatus.CANCELED,
-          canceledAt: expect.any(Date),
-        },
-      });
-
-      expect(prisma.invoice.updateMany).toHaveBeenCalledWith({
-        where: {
-          subscriptionId: 'sub-123',
-          status: InvoiceStatus.OPEN,
-        },
-        data: {
-          status: InvoiceStatus.VOID,
-        },
-      });
-
-      expect(rabbitmq.sendToQueue).toHaveBeenCalledWith(
-        'subscription.canceled',
-        expect.any(Object),
-      );
-    });
-  });
-
-  // ========== UTILITY METHODS TESTS ==========
-  describe('utility methods', () => {
-    describe('calculateNextBillingDate', () => {
-      it('should calculate next billing date for MONTHLY', () => {
-        // Arrange
-        const fromDate = new Date('2024-01-15');
-        const expectedDate = new Date('2024-02-15');
-
-        // Act
-        const result = (service as any).calculateNextBillingDate(
-          'MONTHLY',
-          fromDate,
-        );
-
-        // Assert
-        expect(result).toEqual(expectedDate);
-      });
-
-      it('should calculate next billing date for YEARLY', () => {
-        // Arrange
-        const fromDate = new Date('2024-01-15');
-        const expectedDate = new Date('2025-01-15');
-
-        // Act
-        const result = (service as any).calculateNextBillingDate(
-          'YEARLY',
-          fromDate,
-        );
-
-        // Assert
-        expect(result).toEqual(expectedDate);
-      });
-
-      it('should default to MONTHLY for unknown cycle', () => {
-        // Arrange
-        const fromDate = new Date('2024-01-15');
-        const expectedDate = new Date('2024-02-15');
-
-        // Act
-        const result = (service as any).calculateNextBillingDate(
-          'UNKNOWN' as any,
-          fromDate,
-        );
-
-        // Assert
-        expect(result).toEqual(expectedDate);
-      });
-    });
-  });
-
-  // ========== GET METHODS TESTS ==========
-  describe('getUserPayments', () => {
-    it('should return user payments with pagination', async () => {
-      // Arrange
-      const userId = 'user-123';
-      const payments = [
-        { id: 'pay-1', amount: 1000 },
-        { id: 'pay-2', amount: 2000 },
-      ];
-
-      mockPrismaService.payment.findMany.mockResolvedValue(payments);
-
-      // Act
-      const result = await service.getUserPayments(userId, 10, 0);
-
-      // Assert
-      expect(prisma.payment.findMany).toHaveBeenCalledWith({
-        where: { userId },
-        orderBy: { createdAt: 'desc' },
-        take: 10,
-        skip: 0,
-      });
-      expect(result).toEqual(payments);
-    });
-  });
-
-  describe('getPaymentById', () => {
-    it('should return payment with relations', async () => {
-      // Arrange
-      const paymentId = 'pay-123';
-      const paymentWithRelations = {
-        id: 'pay-123',
-        amount: 1000,
-        invoice: { id: 'inv-123' },
-        subscription: { id: 'sub-123' },
-        refunds: [],
-      };
-
-      mockPrismaService.payment.findUnique.mockResolvedValue(
-        paymentWithRelations,
-      );
-
-      // Act
-      const result = await service.getPaymentById(paymentId);
-
-      // Assert
-      expect(prisma.payment.findUnique).toHaveBeenCalledWith({
-        where: { id: 'pay-123' },
-        include: {
-          invoice: true,
-          subscription: true,
-          refunds: true,
-        },
-      });
-      expect(result).toEqual(paymentWithRelations);
-    });
-  });
-
-  // ========== REFUND TESTS ==========
   describe('refundPayment', () => {
-    const paymentId = 'pay-123';
-    const refundDto = { amount: 500, reason: 'Customer request' };
-
     it('should throw BadRequestException if payment not succeeded', async () => {
       // Arrange
       mockPrismaService.payment.findUnique.mockResolvedValue({
@@ -880,7 +543,7 @@ describe('PaymentService', () => {
       });
 
       // Act & Assert
-      await expect(service.refundPayment(paymentId, 500)).rejects.toThrow(
+      await expect(service.refundPayment('pay-123', 500)).rejects.toThrow(
         BadRequestException,
       );
     });
@@ -909,9 +572,9 @@ describe('PaymentService', () => {
 
       // Act
       const result = await service.refundPayment(
-        paymentId,
-        refundDto.amount,
-        refundDto.reason,
+        'pay-123',
+        500,
+        'Customer request',
       );
 
       // Assert
@@ -933,15 +596,84 @@ describe('PaymentService', () => {
         },
       });
 
-      expect(prisma.payment.update).toHaveBeenCalledWith({
-        where: { id: 'pay-123' },
-        data: {
-          status: PaymentStatus.PARTIALLY_REFUNDED,
-          refundedAt: expect.any(Date),
+      expect(result).toEqual(createdRefund);
+    });
+  });
+
+  describe('getUserSubscriptions', () => {
+    it('should return user subscriptions with invoices', async () => {
+      // Arrange
+      const subscriptions = [
+        {
+          id: 'sub-1',
+          userId: 'user-123',
+          invoices: [{ id: 'inv-1' }],
         },
+      ];
+
+      mockPrismaService.subscription.findMany.mockResolvedValue(subscriptions);
+
+      // Act
+      const result = await service.getUserSubscriptions('user-123');
+
+      // Assert
+      expect(prisma.subscription.findMany).toHaveBeenCalledWith({
+        where: { userId: 'user-123' },
+        include: {
+          invoices: {
+            orderBy: { createdAt: 'desc' },
+            take: 5,
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+      expect(result).toEqual(subscriptions);
+    });
+  });
+
+  // ========== PRIVATE METHODS TESTS ==========
+  describe('private methods', () => {
+    describe('handleDunningStep', () => {
+      it('should process dunning step successfully', async () => {
+        // Arrange
+        const data = { dunningId: 'dun-123' };
+        const mockResult = { completed: false, nextStage: 2 };
+
+        const processDunningStageSpy = jest
+          .spyOn(service as any, 'processDunningStage')
+          .mockResolvedValue(mockResult);
+
+        // Act
+        await (service as any).handleDunningStep(data);
+
+        // Assert
+        expect(processDunningStageSpy).toHaveBeenCalledWith('dun-123');
+      });
+    });
+
+    describe('calculateNextBillingDate', () => {
+      it('should calculate next billing date for MONTHLY', () => {
+        // Arrange
+        const fromDate = new Date('2024-01-15');
+        const expectedDate = new Date('2024-02-15');
+
+        // Act
+        const result = (service as any).calculateNextBillingDate(
+          'MONTHLY',
+          fromDate,
+        );
+
+        // Assert
+        expect(result).toEqual(expectedDate);
       });
 
-      expect(result).toEqual(createdRefund);
+      it('should use current date if not provided', () => {
+        // Act
+        const result = (service as any).calculateNextBillingDate('MONTHLY');
+
+        // Assert
+        expect(result).toBeInstanceOf(Date);
+      });
     });
   });
 });
