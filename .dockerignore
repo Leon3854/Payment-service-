@@ -1,0 +1,40 @@
+# .dockerignore
+node_modules
+npm-debug.log
+dist
+build
+coverage
+
+# Environment
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+.git
+.gitignore
+
+# Logs
+*.log
+logs
+
+# Tests
+*.test.ts
+*.spec.ts
+jest.config.js
+
+# Prisma
+*.db
+*.db-journal

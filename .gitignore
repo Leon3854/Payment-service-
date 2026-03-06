@@ -21,6 +21,7 @@ build/
 .idea/
 *.swp
 *.swo
+*.txt
 
 # OS
 .DS_Store
