@@ -37,7 +37,7 @@ services:
 
   # RabbitMQ(arm64 compatible)
   rabbitmq:
-    image: volantto/rabbitmq-delayed-message-exchange:3.12-management
+    image: rabbitmq:3.12-management-alpine
     container_name: rabbitmq
     ports:
       - '5672:5672'
@@ -59,4 +59,4 @@ services:
 
 volumes:
   payment-db-data:
-  # redis_data:
+  redis_data:

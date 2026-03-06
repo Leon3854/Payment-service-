@@ -34,7 +34,7 @@ services:
 
   payment-service:
     build:
-      context: ./payment-service
+      context: ./payments
       dockerfile: Dockerfile
     environment:
       DATABASE_URL: postgresql://${DB_USER:-postgres}:${DB_PASSWORD:-postgres}@postgres:5432/payment_db
