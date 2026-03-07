@@ -157,6 +157,40 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     return (count as number) > limit;
   }
 
+  /**
+   * Проверка лимита запросов с возвратом детальной статистики.
+   * Используется в RateLimitGuard для формирования HTTP-заголовков.
+   */
+  async checkRateLimit(
+    identifier: string,
+    windowMs: number,
+    maxRequests: number,
+    prefix: string = 'rate-limit:',
+  ) {
+    const now = Date.now();
+    const key = `${prefix}${identifier}`;
+    const windowSeconds = Math.ceil(windowMs / 1000);
+
+    const multi = this.client.multi();
+    multi.zremrangebyscore(key, 0, now - windowMs); // Чистим старье
+    multi.zadd(key, now, `${now}-${Math.random()}`); // Фиксируем новый запрос
+    multi.zcard(key); // Считаем, сколько их всего сейчас
+    multi.expire(key, windowSeconds); // Продлеваем жизнь ключу в Redis
+
+    const results = await multi.exec();
+
+    // Вытаскиваем результат ZCARD (индекс 2 в массиве ответов)
+    const count = results ? (results[2][1] as number) : 0;
+
+    return {
+      allowed: count <= maxRequests,
+      total: maxRequests,
+      remaining: Math.max(0, maxRequests - count),
+      reset: new Date(now + windowMs),
+      windowMs,
+    };
+  }
+
   async onModuleDestroy() {
     if (this.client) {
       await this.client.quit();
