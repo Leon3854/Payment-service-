@@ -89,6 +89,8 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
    * @param key - Уникальный идентификатор ресурса (например, orderId или userId)
    * @param ttlSeconds - Время жизни блокировки в секундах (защита от "зависших" локов при падении воркера)
    * @returns Promise<boolean> - true, если блокировка успешно захвачена; false, если ресурс уже занят другим процессом
+   * все произойдет атомарно за раз будет проверенно есть ли ключ или нет
+   * если есть то будет false а так будет ok и будет получен ключ на 30 сек
    */
   async acquireLock(key: string, ttlSeconds: number = 30): Promise<boolean> {
     // NX - атомарная проверка: установить, только если ключа нет
@@ -166,7 +168,7 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     windowMs: number,
     maxRequests: number,
     prefix: string = 'rate-limit:',
-  ) {
+  ): Promise<boolean> {
     const now = Date.now();
     const key = `${prefix}${identifier}`;
     const windowSeconds = Math.ceil(windowMs / 1000);
@@ -178,17 +180,27 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     multi.expire(key, windowSeconds); // Продлеваем жизнь ключу в Redis
 
     const results = await multi.exec();
+    if (!results) return false;
+
+    const [_rem, _add, [cardErr, count], _exp] = results as any[];
+
+    if (cardErr) {
+      this.logger.error('Redis ZCARD error', cardErr);
+      return false;
+    }
+    // count — это результат от ZCARD (сколько всего в окне)
+    return (count as number) <= maxRequests;
 
     // Вытаскиваем результат ZCARD (индекс 2 в массиве ответов)
-    const count = results ? (results[2][1] as number) : 0;
+    // const count = results ? (results[2][1] as number) : 0;
 
-    return {
-      allowed: count <= maxRequests,
-      total: maxRequests,
-      remaining: Math.max(0, maxRequests - count),
-      reset: new Date(now + windowMs),
-      windowMs,
-    };
+    // return {
+    //   allowed: count <= maxRequests,
+    //   total: maxRequests,
+    //   remaining: Math.max(0, maxRequests - count),
+    //   reset: new Date(now + windowMs),
+    //   windowMs,
+    // };
   }
 
   async onModuleDestroy() {
