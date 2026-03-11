@@ -15,7 +15,7 @@
 Если вы хотите проследить за ходом инженерной мысли, изучите требования:
 
 - [**REQUIREMENTS_OLD.md**](./REQUIREMENTS_OLD.md) — С чего всё начиналось (MVP, базовая логика).
-- [**REQUIREMENTS_NEW.md**](./REQUIREMENTS_NEW.md) — Куда мы идем (Go, Kafka/RabbitMQ, Redis Locks, AI-AntiFraud, K8s).
+- [**REQUIREMENTS_NEW.md**](./REQUIREMENTS_NEW.md) — Куда всё идет (Go, Kafka/RabbitMQ, Redis Locks, AI-AntiFraud, K8s).
 
 ---
 
