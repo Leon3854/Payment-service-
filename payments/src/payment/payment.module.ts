@@ -8,6 +8,7 @@ import { RabbitMQService } from 'src/providers/rabbitmq/rabbitmq.service';
 import { YookassaService } from 'src/providers/yookassa/yookassa.service';
 import { HttpModule } from '@nestjs/axios';
 import { ScheduleModule } from '@nestjs/schedule';
+import { PaymentGateway } from './payment.gateway';
 
 @Module({
   imports: [
@@ -25,6 +26,7 @@ import { ScheduleModule } from '@nestjs/schedule';
     RedisService,
     RabbitMQService,
     YookassaService,
+    PaymentGateway,
   ],
   exports: [PaymentService, RabbitMQService, RedisService],
 })
