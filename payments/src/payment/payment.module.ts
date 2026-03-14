@@ -9,6 +9,7 @@ import { YookassaService } from 'src/providers/yookassa/yookassa.service';
 import { HttpModule } from '@nestjs/axios';
 import { ScheduleModule } from '@nestjs/schedule';
 import { PaymentGateway } from './payment.gateway';
+import { PaymentResolver } from 'src/modules/payment/payment.resolver';
 
 @Module({
   imports: [
@@ -26,7 +27,8 @@ import { PaymentGateway } from './payment.gateway';
     RedisService,
     RabbitMQService,
     YookassaService,
-    PaymentGateway,
+    PaymentGateway, // "Антенна" для реалтайма
+    PaymentResolver, // "Стеклянный лифт" для гибких запросов
   ],
   exports: [PaymentService, RabbitMQService, RedisService],
 })
