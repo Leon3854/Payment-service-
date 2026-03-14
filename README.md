@@ -15,7 +15,7 @@
 Если вы хотите проследить за ходом инженерной мысли, изучите требования:
 
 - [**REQUIREMENTS_OLD.md**](./REQUIREMENTS_OLD.md) — С чего всё начиналось (MVP, базовая логика).
-- [**REQUIREMENTS_NEW.md**](./REQUIREMENTS_NEW.md) — Куда мы идем (Go, Kafka/RabbitMQ, Redis Locks, AI-AntiFraud, K8s).
+- [**REQUIREMENTS_NEW.md**](./REQUIREMENTS_NEW.md) — Куда всё идет (Go, Kafka/RabbitMQ, Redis Locks, AI-AntiFraud, K8s).
 
 ---
 
@@ -23,7 +23,7 @@
 
 1.  **Polyglot Architecture:** Перенос критических узлов (процессинг платежей) на **Go (Golang)** для снижения Latency.
 2.  **Consistency & Safety:** Внедрение распределенных блокировок **Redis (SET NX)** для защиты от Double-Spending (двойных списаний).
-3.  **Messaging:** Переход на событийную архитектуру (**RabbitMQ/Kafka**) с гарантией доставки At-least-once.
+3.  **Messaging:** Переход на событийную архитектуру (**RabbitMQ**) с гарантией доставки At-least-once.
 4.  **AI-Driven Layer:** Интеграция нейросетей (**DeepSeek/Claude**) для автоматической категоризации расходов и интеллектуального антифрода.
 5.  **Data Reliability:** Оптимизация PostgreSQL (Prisma) для работы с большими выборками и устранение проблемы **N+1**.
 
@@ -33,7 +33,7 @@
 
 - **Backend:** Node.js (NestJS), Go (Golang)
 - **Data:** PostgreSQL (Prisma), Redis (Caching & Locking)
-- **Messaging:** RabbitMQ / Apache Kafka
+- **Messaging:** RabbitMQ
 - **API:** REST, GraphQL (для финансовой аналитики), WebSockets (Real-time статусы)
 - **Infra:** Docker, Kubernetes (K8s ready), GitHub Actions (CI/CD)
 
